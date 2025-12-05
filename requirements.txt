@@ -6,3 +6,8 @@ chromadb==0.5.23
 python-dotenv==1.0.1
 pymupdf==1.25.1
 docx2txt==0.8
+pydantic>=2.0.0
+openai>=1.0.0
+tiktoken
+beautifulsoup4
+lxml
