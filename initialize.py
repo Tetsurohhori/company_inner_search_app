@@ -11,6 +11,7 @@ from logging.handlers import TimedRotatingFileHandler
 from uuid import uuid4
 import sys
 import unicodedata
+import csv
 from dotenv import load_dotenv
 import streamlit as st
 from docx import Document
@@ -18,6 +19,7 @@ from langchain_community.document_loaders import WebBaseLoader
 from langchain.text_splitter import CharacterTextSplitter
 from langchain_openai import OpenAIEmbeddings
 from langchain_community.vectorstores import Chroma
+from langchain.schema import Document as LangChainDocument
 import constants as ct
 
 
@@ -101,6 +103,7 @@ def initialize_session_id():
 def initialize_retriever():
     """
     画面読み込み時にRAGのRetriever（ベクターストアから検索するオブジェクト）を作成
+    永続化されたベクターストアがあれば読み込み、なければ新規作成
     """
     # ロガーを読み込むことで、後続の処理中に発生したエラーなどがログファイルに記録される
     logger = logging.getLogger(ct.LOGGER_NAME)
@@ -109,33 +112,54 @@ def initialize_retriever():
     if "retriever" in st.session_state:
         return
     
-    # RAGの参照先となるデータソースの読み込み
-    docs_all = load_data_sources()
-
-    # OSがWindowsの場合、Unicode正規化と、cp932（Windows用の文字コード）で表現できない文字を除去
-    for doc in docs_all:
-        doc.page_content = adjust_string(doc.page_content)
-        for key in doc.metadata:
-            doc.metadata[key] = adjust_string(doc.metadata[key])
-    
     # 埋め込みモデルの用意
     embeddings = OpenAIEmbeddings()
     
-    # チャンク分割用のオブジェクトを作成
-    text_splitter = CharacterTextSplitter(
-        chunk_size=500,
-        chunk_overlap=50,
-        separator="\n"
-    )
+    # 永続化されたベクターストアが存在するか確認
+    if os.path.exists(ct.VECTOR_DB_PATH):
+        # 既存のベクターストアを読み込み
+        logger.info(f"既存のベクターストアを読み込み: {ct.VECTOR_DB_PATH}")
+        db = Chroma(persist_directory=ct.VECTOR_DB_PATH, embedding_function=embeddings)
+    else:
+        # 新規作成
+        logger.info("新規ベクターストアを作成")
+        
+        # RAGの参照先となるデータソースの読み込み
+        docs_all = load_data_sources()
 
-    # チャンク分割を実施
-    splitted_docs = text_splitter.split_documents(docs_all)
+        # OSがWindowsの場合、Unicode正規化と、cp932（Windows用の文字コード）で表現できない文字を除去
+        for doc in docs_all:
+            doc.page_content = adjust_string(doc.page_content)
+            for key in doc.metadata:
+                doc.metadata[key] = adjust_string(doc.metadata[key])
+        
+        # CSVドキュメントと他のドキュメントを分離
+        csv_docs = [doc for doc in docs_all if doc.metadata.get("source", "").endswith(".csv")]
+        other_docs = [doc for doc in docs_all if not doc.metadata.get("source", "").endswith(".csv")]
+        
+        # チャンク分割用のオブジェクトを作成
+        text_splitter = CharacterTextSplitter(
+            chunk_size=ct.CHUNK_SIZE,
+            chunk_overlap=ct.CHUNK_OVERLAP,
+            separator="\n"
+        )
 
-    # ベクターストアの作成
-    db = Chroma.from_documents(splitted_docs, embedding=embeddings)
+        # CSVドキュメント以外をチャンク分割
+        splitted_docs = text_splitter.split_documents(other_docs)
+        
+        # CSVドキュメントはチャンク分割せずにそのまま追加
+        splitted_docs.extend(csv_docs)
+
+        # ベクターストアの作成（永続化ディレクトリを指定）
+        db = Chroma.from_documents(
+            splitted_docs, 
+            embedding=embeddings,
+            persist_directory=ct.VECTOR_DB_PATH
+        )
+        logger.info(f"ベクターストアを永続化: {ct.VECTOR_DB_PATH}")
 
     # ベクターストアを検索するRetrieverの作成
-    st.session_state.retriever = db.as_retriever(search_kwargs={"k": 3})
+    st.session_state.retriever = db.as_retriever(search_kwargs={"k": ct.RETRIEVER_K})
 
 
 def initialize_session_state():
@@ -209,15 +233,90 @@ def file_load(path, docs_all):
     """
     # ファイルの拡張子を取得
     file_extension = os.path.splitext(path)[1]
-    # ファイル名（拡張子を含む）を取得
+    # ファイル名(拡張子を含む)を取得
     file_name = os.path.basename(path)
 
     # 想定していたファイル形式の場合のみ読み込む
     if file_extension in ct.SUPPORTED_EXTENSIONS:
-        # ファイルの拡張子に合ったdata loaderを使ってデータ読み込み
-        loader = ct.SUPPORTED_EXTENSIONS[file_extension](path)
-        docs = loader.load()
-        docs_all.extend(docs)
+        # CSVファイルの場合は特別な処理を行う
+        if file_extension == ".csv":
+            csv_docs = load_csv_as_single_document(path)
+            if csv_docs:
+                docs_all.extend(csv_docs)
+        else:
+            # ファイルの拡張子に合ったdata loaderを使ってデータ読み込み
+            loader = ct.SUPPORTED_EXTENSIONS[file_extension](path)
+            docs = loader.load()
+            docs_all.extend(docs)
+
+
+def load_csv_as_single_document(path):
+    """
+    CSVファイルを部門別に統合したドキュメントとして読み込む
+
+    Args:
+        path: CSVファイルのパス
+    
+    Returns:
+        部門別に統合されたLangChainドキュメントのリスト
+    """
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            csv_reader = csv.reader(f)
+            rows = list(csv_reader)
+            
+            if len(rows) == 0:
+                return None
+            
+            # ヘッダー行を取得
+            headers = rows[0]
+            
+            # 部署列のインデックスを取得
+            dept_index = headers.index("部署") if "部署" in headers else None
+            
+            if dept_index is None:
+                # 部署列がない場合は全行を1つのドキュメントに
+                combined_text = ""
+                for i, row in enumerate(rows[1:], 1):
+                    row_text = " | ".join([f"{headers[j]}: {row[j]}" for j in range(len(row)) if j < len(headers)])
+                    combined_text += f"従業員{i}: {row_text}\n"
+                
+                return [LangChainDocument(
+                    page_content=combined_text,
+                    metadata={"source": path}
+                )]
+            
+            # 部門別にグループ化
+            dept_data = {}
+            for row in rows[1:]:
+                if len(row) > dept_index:
+                    dept = row[dept_index]
+                    if dept not in dept_data:
+                        dept_data[dept] = []
+                    dept_data[dept].append(row)
+            
+            # 部門別にドキュメントを作成
+            documents = []
+            for dept, dept_rows in dept_data.items():
+                combined_text = f"【{dept}の従業員一覧】\n\n"
+                for i, row in enumerate(dept_rows, 1):
+                    row_text = " | ".join([f"{headers[j]}: {row[j]}" for j in range(len(row)) if j < len(headers)])
+                    combined_text += f"{i}人目: {row_text}\n"
+                
+                documents.append(LangChainDocument(
+                    page_content=combined_text,
+                    metadata={
+                        "source": path,
+                        "department": dept,
+                        "employee_count": len(dept_rows)
+                    }
+                ))
+            
+            return documents
+    except Exception as e:
+        print(f"CSV読み込みエラー: {path} - {str(e)}")
+        return None
+
 
 
 def adjust_string(s):

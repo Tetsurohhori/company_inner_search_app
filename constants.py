@@ -16,7 +16,7 @@ from langchain_community.document_loaders.csv_loader import CSVLoader
 # ==========================================
 # 画面表示系
 # ==========================================
-APP_NAME = "社内情報特化型生成AI検索アプリ"
+APP_NAME = "FB_Salesチーム専用検索アプリ"
 ANSWER_MODE_1 = "社内文書検索"
 ANSWER_MODE_2 = "社内問い合わせ"
 CHAT_INPUT_HELPER_TEXT = "こちらからメッセージを送信してください。"
@@ -46,11 +46,16 @@ TEMPERATURE = 0.5
 # ==========================================
 # RAG参照用のデータソース系
 # ==========================================
+CHUNK_SIZE = 500
+CHUNK_OVERLAP = 50
+RETRIEVER_K = 5
 RAG_TOP_FOLDER_PATH = "./data"
+VECTOR_DB_PATH = "./chroma_db"  # ベクターストア永続化用のディレクトリ
 SUPPORTED_EXTENSIONS = {
     ".pdf": PyMuPDFLoader,
     ".docx": Docx2txtLoader,
-    ".csv": lambda path: CSVLoader(path, encoding="utf-8")
+    ".csv": lambda path: CSVLoader(path, encoding="utf-8"),
+    ".txt": lambda path: TextLoader(path, encoding="utf-8")
 }
 WEB_URL_LOAD_TARGETS = [
     "https://generative-ai.web-camp.io/"
