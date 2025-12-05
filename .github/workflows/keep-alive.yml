@@ -1,0 +1,15 @@
+name: Keep Streamlit App Alive
+
+on:
+  schedule:
+    # 毎日5分ごとにアプリにアクセス (平日のみ、日本時間9:00-18:00)
+    - cron: '*/5 0-9 * * 1-5'  # UTC 0:00-9:00 = JST 9:00-18:00
+  workflow_dispatch:  # 手動実行も可能
+
+jobs:
+  keep-alive:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Streamlit App
+        run: |
+          curl -I https://companyinnersearchapp-tlcnh4pckr7eema9jhsadr.streamlit.app/
